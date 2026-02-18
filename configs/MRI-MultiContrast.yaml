@@ -1,0 +1,41 @@
+dataset_name: 'mri_multicontrast'
+dataset_type: 'MRIMultiContrast'
+
+# Contrast parameter specification
+ContrastEmbedding:
+  contrast_dim: 5  # Number of contrast types: [T1, T2, FLAIR, PD, T2*]
+  embedding_dim: 512
+  num_contrasts: 5
+
+# Model configuration
+model:
+  BB:
+    params:
+      num_timesteps: 1000
+      mt_type: 'sin'
+      max_var: 1.0
+      eta: 1.0
+      skip_sample: true
+      sample_type: 'cosine'
+      sample_step: 50
+      loss_type: 'l2'
+      objective: 'noise'  # or 'grad' or 'ysubx'
+      
+      UNetParams:
+        image_size: 256
+        in_channels: 1  # Single-channel MRI
+        out_channels: 1
+        condition_key: 'vector'  # NEW: indicates vector conditioning
+        model_channels: 128
+        num_res_blocks: 2
+        attention_resolutions: [8, 16]
+        
+  normalize_latent: true
+  latent_before_quant_conv: false
+
+training:
+  batch_size: 4
+  learning_rate: 1.0e-4
+  n_epochs: 100
+  weight_decay: 1.0e-6
+  use_ema: true
