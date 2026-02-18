@@ -3,9 +3,9 @@ dataset_type: 'MRIMultiContrast'
 
 # Contrast parameter specification
 ContrastEmbedding:
-  contrast_dim: 5  # Number of contrast types: [T1, T2, FLAIR, PD, T2*]
+  contrast_dim: 2  # Number of contrast types: [T1, T2]
   embedding_dim: 512
-  num_contrasts: 5
+  num_contrasts: 2
 
 # Model configuration
 model:
@@ -25,17 +25,22 @@ model:
         image_size: 256
         in_channels: 1  # Single-channel MRI
         out_channels: 1
-        condition_key: 'vector'  # NEW: indicates vector conditioning
         model_channels: 128
         num_res_blocks: 2
         attention_resolutions: [8, 16]
+        num_heads: 4
+        num_head_channels: -1
+        condition_key: 'nocond'  # CHANGED: disable concatenation
+        use_scale_shift_norm: true
+        resblock_updown: true
+        use_new_attention_order: false
         
   normalize_latent: true
   latent_before_quant_conv: false
 
 training:
   batch_size: 4
-  learning_rate: 1.0e-4
-  n_epochs: 100
+  learning_rate: 5.0e-5  # REDUCED from 1e-4 to 5e-5 for stability
+  n_epochs: 10000
   weight_decay: 1.0e-6
   use_ema: true

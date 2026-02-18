@@ -1,132 +1,145 @@
 import torch
 import torch.nn as nn
 from model.BrownianBridge.BrownianBridgeModel import BrownianBridgeModel
+import sys
+from pathlib import Path
+
+# Add parent directory to path to import mri_contrast_embedder
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from mri_contrast_embedder import ContrastEmbedding
+
 
 class ContrastConditionalBrownianBridgeModel(BrownianBridgeModel):
     """
-    Modified for contrast-conditional generation.
+    Modified BBDM for contrast-conditional MRI generation.
     
-    Instead of conditioning on another image (β), we condition on
-    a contrast parameter vector (θ) that specifies what type of
-    MRI contrast to synthesize.
+    Since we're using 'nocond' in the UNet, we condition through the
+    Brownian bridge: y is derived from the contrast embedding.
     """
     
-    # def __init__(self, model_config):
-    #     super().__init__(model_config)
     def __init__(self, model_config):
-        # Don't call super().__init__() for the full BBDM init
-        # Instead, initialize components selectively
-        nn.Module.__init__(self)
-        # ... initialize components separately
-
-        # Remove VQGAN since we're not conditioning on an image
-        # self.vqgan is only used for encoding β (source image)
+        if hasattr(model_config, 'model'):
+            inner_config = model_config.model
+        else:
+            inner_config = model_config
+        
+        super().__init__(inner_config)
+        
+        if hasattr(model_config, 'ContrastEmbedding'):
+            contrast_config = model_config.ContrastEmbedding
+        else:
+            raise AttributeError("Could not find ContrastEmbedding config")
         
         # Create contrast embedding module
         self.contrast_embedder = ContrastEmbedding(
-            contrast_dim=model_config.ContrastEmbedding.contrast_dim,
-            embedding_dim=model_config.ContrastEmbedding.embedding_dim,
-            num_contrasts=model_config.ContrastEmbedding.num_contrasts
+            contrast_dim=contrast_config.contrast_dim,
+            embedding_dim=contrast_config.embedding_dim,
+            num_contrasts=contrast_config.num_contrasts
         )
         
-        self.condition_key = model_config.BB.params.UNetParams.condition_key
+        self.embedding_dim = contrast_config.embedding_dim
         
-    def get_parameters(self):
-        """
-        Optimize both the UNet and the contrast embedder.
-        """
-        print("get parameters to optimize: Contrast Embedder, UNet")
-        params = list(self.denoise_fn.parameters()) + list(self.contrast_embedder.parameters())
-        return iter(params)
+        # Create a learnable projection to convert embedding to spatial feature map
+        # Use a more sophisticated architecture with layer normalization
+        self.embedding_to_latent = nn.Sequential(
+            nn.Linear(contrast_config.embedding_dim, 512),
+            nn.LayerNorm(512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Linear(256, self.channels * 64 * 64)  # Project to larger spatial size
+        )
+        
+        # Initialize weights properly
+        for module in self.embedding_to_latent:
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                nn.init.constant_(module.bias, 0.0)
+        
+        print(f"✓ Initialized ContrastConditionalBrownianBridgeModel")
+        print(f"  Contrast dim: {contrast_config.contrast_dim}")
+        print(f"  Embedding dim: {contrast_config.embedding_dim}")
+        print(f"  Using 'nocond' UNet (conditioning via Brownian bridge)")
     
+    def get_parameters(self):
+        print("✓ Optimizing: Contrast Embedder + Embedding-to-Latent + UNet")
+        params = (list(self.denoise_fn.parameters()) + 
+                 list(self.contrast_embedder.parameters()) +
+                 list(self.embedding_to_latent.parameters()))
+        return iter(params)
     
     def forward(self, beta: torch.Tensor, theta: torch.Tensor, context=None):
         """
+        Forward pass for training.
+        
         Args:
-            beta: [B, C, H, W] - source MRI image
+            beta: [B, C, H, W] - source MRI image (used for shape only)
             theta: [B, contrast_dim] - target contrast parameters
-            context: Optional pre-computed context
+            context: Optional pre-computed context (ignored, using theta)
         
         Returns:
-            loss and log_dict
+            loss: scalar loss value
+            log_dict: dictionary with logging information
         """
-        # β is the source image we want to translate FROM
-        # θ specifies what contrast to synthesize TO
-        
-        # In the BBDM formulation:
-        # x0 = target (what we want to synthesize, initially random)
-        # y = condition (what guides the generation)
-        
-        # For your case, we generate all outputs from θ conditioning
-        # We can optionally also use β for additional guidance
-        
-        with torch.no_grad():
-            # We don't need to encode β as a condition anymore
-            # But we might want to encode it for feature extraction
-            # beta_latent = self.encode_source(beta, cond=False)  # Optional
-            pass
-        
-        # Get context from contrast parameters
-        context = self.get_contrast_context(theta)
-        
-        # Random target latent (will be denoised towards theta)
         B, C, H, W = beta.shape
-        x_latent = torch.randn_like(beta)  # Random initialization
-        
-        # Get timesteps
         device = beta.device
+        
+        # Get context embedding from contrast parameters
+        context_embedding = self.get_contrast_context(theta)  # [B, embedding_dim]
+        
+        # Project embedding to latent space to create the bridge endpoint
+        # This becomes "y" in the Brownian bridge
+        y_latent = self.embedding_to_latent(context_embedding)  # [B, C*64*64]
+        y_latent = y_latent.reshape(B, self.channels, 64, 64)  # [B, C, 64, 64]
+        
+        # Resize to match input size if needed
+        if (64, 64) != (H, W):
+            y_latent = torch.nn.functional.interpolate(
+                y_latent, size=(H, W), mode='bilinear', align_corners=False
+            )
+        
+        # Random noise as x0
+        x_latent = torch.randn(B, C, H, W, device=device)
+        
+        # Random timesteps
         t = torch.randint(0, self.num_timesteps, (B,), device=device).long()
         
-        # For BBDM: we bridge from x (random) to y (condition-based)
-        # y_latent should represent the "endpoint" encoded from θ
-        # One approach: use a learned "anchor" or the θ embedding itself
-        
-        # return self.p_losses(x_latent, theta, context, t)
-        # Create a learned or projected "endpoint" from theta
-        # y_latent = self.contrast_embedder.spatial_proj(context)
-        y_latent = y_latent.reshape(B, 1, 16, 16)  # Or appropriate spatial dims
-        return self.p_losses(x_latent, y_latent, context, t)
+        # Call p_losses with:
+        # - x0: random latent [B, C, H, W]
+        # - y: latent derived from contrast embedding [B, C, H, W]
+        # - context: None (since we're using nocond)
+        return self.p_losses(x_latent, y_latent, None, t)
     
     def get_contrast_context(self, theta: torch.Tensor) -> torch.Tensor:
-        """
-        Convert contrast parameters to context embedding.
-        
-        Args:
-            theta: [B, contrast_dim]
-        
-        Returns:
-            context: [B, embedding_dim] - learnable embedding
-        """
+        """Convert contrast parameters to context embedding."""
         context = self.contrast_embedder(theta)
         return context
     
     @torch.no_grad()
-    def sample(self, theta: torch.Tensor, num_samples: int = 1, 
-               clip_denoised=False, sample_mid_step=False):
-        """
-        Generate MRI images for specified contrasts.
-        
-        Args:
-            theta: [B, contrast_dim] or [contrast_dim] - contrast parameters
-            num_samples: number of samples to generate per contrast
-        
-        Returns:
-            generated images
-        """
+    def sample(self, theta: torch.Tensor, clip_denoised: bool = True, sample_mid_step: bool = False):
+        """Generate MRI images for specified contrasts."""
         if theta.dim() == 1:
-            theta = theta.unsqueeze(0)  # [contrast_dim] -> [1, contrast_dim]
+            theta = theta.unsqueeze(0)
         
         B = theta.shape[0]
-        context = self.get_contrast_context(theta)
+        device = theta.device
         
-        # Initialize y from context (the "bridge endpoint")
-        # Option 1: Use context directly
-        y = context
+        # Get context embedding
+        context_embedding = self.get_contrast_context(theta)  # [B, embedding_dim]
         
-        # Option 2: Project context to spatial dimensions
-        # y = self.contrast_embedder.to_spatial(context, self.image_size)
+        # Project to latent space for bridge endpoint
+        y_latent = self.embedding_to_latent(context_embedding)  # [B, C*H*W]
+        y_latent = y_latent.reshape(B, self.channels, 64, 64)  # [B, C, 64, 64]
         
-        return self.p_sample_loop(y=y, context=context, 
-                                 clip_denoised=clip_denoised, 
-                                 sample_mid_step=sample_mid_step)
+        # Resize to image size
+        y_latent = torch.nn.functional.interpolate(
+            y_latent, size=(self.image_size, self.image_size), mode='bilinear', align_corners=False
+        )
+        
+        return self.p_sample_loop(
+            y=y_latent,
+            context=None,  # No context needed since we use nocond
+            clip_denoised=clip_denoised,
+            sample_mid_step=sample_mid_step
+        )
