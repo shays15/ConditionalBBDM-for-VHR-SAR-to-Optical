@@ -7,6 +7,10 @@ from torchvision.utils import make_grid, save_image
 from Register import Registers
 import sys
 
+import nibabel as nib
+import numpy as np
+from pathlib import Path
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from datasets.custom import CustomSingleDataset, CustomAlignedDataset, CustomInpaintingDataset
 
@@ -71,15 +75,68 @@ def get_dataset(data_config):
     return train_dataset, val_dataset, test_dataset
 
 
-@torch.no_grad()
-def save_single_image(image, save_path, file_name, to_normal=True):
-    image = image.detach().clone()
-    if to_normal:
-        image = image.mul_(0.5).add_(0.5).clamp_(0, 1.)
-    image = image.mul_(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to('cpu', torch.uint8).numpy()
-    im = Image.fromarray(image)
-    im.save(os.path.join(save_path, file_name))
+# @torch.no_grad()
+# def save_single_image(image, save_path, file_name, to_normal=True):
+#     image = image.detach().clone()
+#     if to_normal:
+#         image = image.mul_(0.5).add_(0.5).clamp_(0, 1.)
+#     image = image.mul_(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to('cpu', torch.uint8).numpy()
+#     im = Image.fromarray(image)
+#     im.save(os.path.join(save_path, file_name))
 
+@torch.no_grad()
+def save_single_image(image, save_path, file_name, to_normal=True, min_val=0, max_val=2000, ref_nifti_path='/iacl/pg23/savannah/data/umdctmri/UMDCTMRI-008/00/proc/UMDCTMRI-008_00_00-01_HEAD-CT-UNK-3D-UNK-UNK_n4_reg.nii.gz'):
+    """
+    Save a PyTorch tensor as a NIfTI file with values scaled to [min_val, max_val],
+    using the affine and header from a reference NIfTI.
+
+    Args:
+        image (torch.Tensor): Tensor of shape (C, H, W), (H, W), or (H, W, D)
+        save_path (str or Path): Directory to save the NIfTI file
+        file_name (str): Output filename (e.g., 'pred.nii.gz')
+        min_val (float): Minimum intensity value in the saved image
+        max_val (float): Maximum intensity value in the saved image
+        ref_nifti_path (str or Path): Path to a reference NIfTI file to copy affine and header from
+    """
+    # Load reference NIfTI to get affine and header
+    if ref_nifti_path is not None:
+        ref_nii = nib.load(str(ref_nifti_path))
+        affine = ref_nii.affine
+        header = ref_nii.header
+    else:
+        affine = np.eye(4)
+        header = None
+
+    # Detach from graph and move to CPU
+    image = image.detach().cpu().float()
+
+    # Squeeze singleton channel if present
+    if image.ndim == 3 and image.shape[0] == 1:
+        image = image[0]
+    elif image.ndim == 4 and image.shape[0] == 1:
+        image = image[0]
+
+    # Normalize to [0, 1]
+    # image = (image - image.min()) / (image.max() - image.min() + 1e-8)
+
+    # Rescale to desired intensity range
+    # image = image * (max_val - min_val) + min_val
+
+    # Convert to NumPy
+    image_np = image.numpy()
+    
+    # Rotate 90° clockwise (k=-1), then flip vertically (axis=1)
+    if image_np.ndim == 2:
+        image_np = np.rot90(image_np, k=1)
+        image_np = np.flip(image_np, axis=0)
+    elif image_np.ndim == 3:
+        # Apply to each 2D slice
+        for i in range(image_np.shape[0]):
+        	image_np[i] = np.flip(np.rot90(image_np[i], k=1), axis=0)
+
+    # Save as NIfTI
+    nii = nib.Nifti1Image(image_np, affine=affine, header=header)
+    nib.save(nii, str(Path(save_path) / file_name))
 
 @torch.no_grad()
 def get_image_grid(batch, grid_size=4, to_normal=True):

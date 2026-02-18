@@ -249,10 +249,10 @@ class BBDMRunner(DiffusionBaseRunner):
                     gt = x[i]
                     result = sample[i]
                     if j == 0:
-                        save_single_image(condition, condition_path, f'{x_cond_name[i]}.png', to_normal=to_normal)
-                        save_single_image(gt, gt_path, f'{x_name[i]}.png', to_normal=to_normal)
+                        save_single_image(condition, condition_path, f'{x_cond_name[i]}.nii.gz', to_normal=to_normal)
+                        save_single_image(gt, gt_path, f'{x_name[i]}.nii.gz', to_normal=to_normal)
                     if sample_num > 1:
                         result_path_i = make_dir(os.path.join(result_path, x_name[i]))
-                        save_single_image(result, result_path_i, f'output_{j}.png', to_normal=to_normal)
+                        save_single_image(result, result_path_i, f'output_{j}.nii.gz', to_normal=to_normal)
                     else:
-                        save_single_image(result, result_path, f'{x_name[i]}.png', to_normal=to_normal)
+                        save_single_image(result, result_path, f'{x_name[i]}.nii.gz', to_normal=to_normal)
